@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Spot the Fake Photo — Live Demo</title>
+<style>
+  body { font-family: -apple-system, sans-serif; background:#111; color:#eee; text-align:center; margin:0; padding:20px; }
+  video, canvas { max-width: 90vw; border-radius: 12px; }
+  #score { font-size: 3rem; margin: 16px; font-weight: bold; }
+  .real { color: #4ade80; }
+  .screen { color: #f87171; }
+  #bar { height: 14px; width: 90vw; max-width: 480px; margin: 0 auto; background:#333; border-radius:8px; overflow:hidden; }
+  #fill { height: 100%; width: 50%; background: linear-gradient(90deg,#4ade80,#f87171); transition: width .15s; }
+  p.note { max-width: 480px; margin: 16px auto; color:#999; font-size:0.85rem; }
+</style>
+</head>
+<body>
+<h2>Spot the Fake Photo — live demo</h2>
+<p class="note">Simplified, client-side JS approximation of the same idea used in
+<code>predict.py</code> (glare + color cast + local high-frequency texture,
+via canvas pixel data). It's rougher than the calibrated Python version —
+built to show the concept live in a browser, not to be judged for accuracy.</p>
+<video id="video" autoplay playsinline muted></video>
+<canvas id="canvas" style="display:none;"></canvas>
+<div id="score" class="real">0.00</div>
+<div id="bar"><div id="fill"></div></div>
+<p id="label">REAL</p>
+
+<script>
+const video = document.getElementById('video');
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d', { willReadFrequently: true });
+const scoreEl = document.getElementById('score');
+const fillEl = document.getElementById('fill');
+const labelEl = document.getElementById('label');
+
+navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } })
+  .then(stream => { video.srcObject = stream; requestAnimationFrame(loop); })
+  .catch(err => { document.body.innerHTML += '<p>Camera error: ' + err + '</p>'; });
+
+function analyzeFrame() {
+  const W = 160, H = 120; // small for speed
+  canvas.width = W; canvas.height = H;
+  ctx.drawImage(video, 0, 0, W, H);
+  const { data } = ctx.getImageData(0, 0, W, H);
+
+  let rSum=0, gSum=0, bSum=0, hotCount=0, gradSum=0, gradSqSum=0, n=W*H;
+  const gray = new Float32Array(n);
+
+  for (let i = 0, p = 0; i < n; i++, p += 4) {
+    const r = data[p], g = data[p+1], b = data[p+2];
+    rSum += r; gSum += g; bSum += b;
+    const v = Math.max(r,g,b)/255, mx = Math.max(r,g,b), mn = Math.min(r,g,b);
+    const sat = mx === 0 ? 0 : (mx-mn)/mx;
+    if (v > 0.92 && sat < 0.25) hotCount++;
+    gray[i] = 0.299*r + 0.587*g + 0.114*b;
+  }
+
+  // local high-frequency "texture regularity": simple horizontal gradient
+  // magnitude variance, as a cheap stand-in for the FFT/autocorr features.
+  for (let y = 1; y < H-1; y++) {
+    for (let x = 1; x < W-1; x++) {
+      const i = y*W+x;
+      const gx = gray[i+1] - gray[i-1];
+      const gy = gray[i+W] - gray[i-W];
+      const mag = Math.sqrt(gx*gx + gy*gy);
+      gradSum += mag; gradSqSum += mag*mag;
+    }
+  }
+  const gradMean = gradSum / n;
+  const gradVar = gradSqSum / n - gradMean*gradMean;
+  // regular grid-like textures -> gradient magnitude clusters tightly ->
+  // low variance relative to mean (crude periodicity proxy).
+  const regularity = gradMean > 0 ? 1 - Math.min(1, gradVar / (gradMean*gradMean*8)) : 0;
+
+  const rMean = rSum/n, gMean = gSum/n, bMean = bSum/n;
+  const denom = (rMean+gMean+bMean)/3 + 1e-6;
+  const colorCast = Math.max(0, ((gMean+bMean)/2 - rMean) / denom);
+  const glare = hotCount / n;
+
+  // crude weighted blend -> [0,1] score (NOT the calibrated model — for
+  // live-demo feel only).
+  let raw = 0.5*regularity + 0.3*Math.min(1, glare*6) + 0.4*Math.min(1, colorCast*4);
+  return Math.max(0, Math.min(1, raw));
+}
+
+function loop() {
+  if (video.readyState === video.HAVE_ENOUGH_DATA) {
+    const s = analyzeFrame();
+    scoreEl.textContent = s.toFixed(2);
+    fillEl.style.width = (s*100) + '%';
+    if (s > 0.5) {
+      scoreEl.className = 'screen'; labelEl.textContent = 'LOOKS LIKE A SCREEN';
+    } else {
+      scoreEl.className = 'real'; labelEl.textContent = 'LOOKS REAL';
+    }
+  }
+  setTimeout(() => requestAnimationFrame(loop), 150);
+}
+</script>
+</body>
+</html>
